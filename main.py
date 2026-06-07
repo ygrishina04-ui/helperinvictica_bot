@@ -1,39 +1,48 @@
 import os
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
 import requests
 from flask import Flask, request
+from docx import Document
 
 app = Flask(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATE_PATH = BASE_DIR / "templates" / "moscow_cargo_template.docx"
+GENERATED_DIR = BASE_DIR / "generated"
+GENERATED_DIR.mkdir(exist_ok=True)
+
 user_states = {}
+power_counter = 0
 
 
 def send_message(chat_id, text, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
-
+    payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+
+
+def send_document(chat_id, file_path, caption=""):
+    with open(file_path, "rb") as f:
+        requests.post(
+            f"{TELEGRAM_API}/sendDocument",
+            data={"chat_id": chat_id, "caption": caption},
+            files={"document": f},
+        )
 
 
 def send_main_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
-            [
-                {
-                    "text": "📄 Доверенность Москва Карго",
-                    "callback_data": "power_moscow_cargo"
-                }
-            ]
+            [{"text": "📄 Доверенность Москва Карго", "callback_data": "power_moscow_cargo"}]
         ]
     }
-
     send_message(chat_id, "Выберите действие:", keyboard)
 
 
@@ -70,12 +79,31 @@ def handle_callback(callback):
     chat_id = callback["message"]["chat"]["id"]
     data = callback["data"]
 
+    requests.post(
+        f"{TELEGRAM_API}/answerCallbackQuery",
+        json={"callback_query_id": callback["id"]},
+    )
+
     if data == "power_moscow_cargo":
-        user_states[chat_id] = {
-            "step": "company",
-            "data": {}
-        }
+        user_states[chat_id] = {"step": "company", "data": {}}
         send_message(chat_id, "Введите название компании-доверителя:")
+        return
+
+    if data in ["transfer_yes", "transfer_no"]:
+        state = user_states.get(chat_id)
+
+        if not state:
+            send_message(chat_id, "Напишите /start, чтобы начать заново.")
+            return
+
+        if data == "transfer_yes":
+            state["data"]["transfer_right"] = "с правом последующего передоверия"
+        else:
+            state["data"]["transfer_right"] = "без права передоверия"
+
+        state["step"] = "term"
+        send_message(chat_id, "Введите срок действия доверенности. Например: 3 года")
+        return
 
 
 def process_power_input(chat_id, text):
@@ -120,15 +148,125 @@ def process_power_input(chat_id, text):
 
     if step == "director_name":
         data["director_name"] = text
-        state["step"] = "term"
-        send_message(chat_id, "Введите срок действия доверенности. Например: 3 года")
+        state["step"] = "transfer_right"
+
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "Да, с правом передоверия", "callback_data": "transfer_yes"}],
+                [{"text": "Нет, без права передоверия", "callback_data": "transfer_no"}],
+            ]
+        }
+
+        send_message(chat_id, "Доверенность с правом передоверия?", keyboard)
         return
 
     if step == "term":
         data["term"] = text
-        send_message(chat_id, "✅ Данные собраны. Следующим шагом добавим формирование Word-файла.")
         user_states.pop(chat_id, None)
+
+        send_message(chat_id, "Формирую доверенность...")
+
+        docx_path = generate_moscow_cargo_power(data)
+        send_document(chat_id, docx_path, "Готово: Word-файл доверенности")
+
+        pdf_path = convert_to_pdf(docx_path)
+        if pdf_path and pdf_path.exists():
+            send_document(chat_id, pdf_path, "Готово: PDF-файл доверенности")
+        else:
+            send_message(chat_id, "Word-файл готов. PDF пока не сформировался.")
+
+        send_main_menu(chat_id)
         return
+
+
+def generate_moscow_cargo_power(data):
+    number = generate_number()
+    date_text = datetime.now().strftime("%d.%m.%Y")
+
+    replacements = {
+        "{{NUMBER}}": number,
+        "{{DATE}}": date_text,
+        "{{COMPANY}}": data["company"],
+        "{{ADDRESS}}": data["address"],
+        "{{INN}}": data["inn"],
+        "{{OGRN}}": data["ogrn"],
+        "{{DIRECTOR_POSITION}}": data["director_position"],
+        "{{DIRECTOR_NAME}}": data["director_name"],
+        "{{TERM}}": data["term"],
+        "{{TRANSFER_RIGHT}}": data["transfer_right"],
+    }
+
+    doc = Document(TEMPLATE_PATH)
+
+    for paragraph in doc.paragraphs:
+        replace_in_paragraph(paragraph, replacements)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    replace_in_paragraph(paragraph, replacements)
+
+    safe_company = make_safe_filename(data["company"])
+    filename = f"Доверенность_Москва_Карго_{number}_{safe_company}.docx"
+    output_path = GENERATED_DIR / filename
+
+    doc.save(output_path)
+    return output_path
+
+
+def replace_in_paragraph(paragraph, replacements):
+    full_text = "".join(run.text for run in paragraph.runs)
+
+    if not any(key in full_text for key in replacements):
+        return
+
+    for key, value in replacements.items():
+        full_text = full_text.replace(key, str(value))
+
+    for run in paragraph.runs:
+        run.text = ""
+
+    if paragraph.runs:
+        paragraph.runs[0].text = full_text
+    else:
+        paragraph.add_run(full_text)
+
+
+def convert_to_pdf(docx_path):
+    try:
+        subprocess.run(
+            [
+                "libreoffice",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(GENERATED_DIR),
+                str(docx_path),
+            ],
+            check=True,
+            timeout=60,
+        )
+        return docx_path.with_suffix(".pdf")
+
+    except Exception as e:
+        print(f"PDF conversion error: {e}")
+        return None
+
+
+def generate_number():
+    global power_counter
+    power_counter += 1
+    year = datetime.now().strftime("%Y")
+    return f"ДМК-{year}-{str(power_counter).zfill(3)}"
+
+
+def make_safe_filename(text):
+    bad_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    for char in bad_chars:
+        text = text.replace(char, "_")
+    return text.replace(" ", "_")[:60]
 
 
 if __name__ == "__main__":
