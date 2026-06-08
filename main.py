@@ -1,5 +1,4 @@
 import os
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -13,7 +12,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 BASE_DIR = Path(__file__).resolve().parent
-TEMPLATE_PATH = BASE_DIR / "templates" / "moscow_cargo_template.docx"
+MOSCOW_CARGO_TEMPLATE_PATH = BASE_DIR / "templates" / "moscow_cargo_template.docx"
 PORTS_RF_TEMPLATE_PATH = BASE_DIR / "templates" / "ports_rf_template.docx"
 GENERATED_DIR = BASE_DIR / "generated"
 GENERATED_DIR.mkdir(exist_ok=True)
@@ -23,28 +22,49 @@ power_counter = 0
 
 
 def send_message(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text}
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+
     if reply_markup:
         payload["reply_markup"] = reply_markup
+
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
 
 
 def send_document(chat_id, file_path, caption=""):
-    with open(file_path, "rb") as f:
+    with open(file_path, "rb") as file:
         requests.post(
             f"{TELEGRAM_API}/sendDocument",
-            data={"chat_id": chat_id, "caption": caption},
-            files={"document": f},
+            data={
+                "chat_id": chat_id,
+                "caption": caption
+            },
+            files={
+                "document": file
+            },
         )
 
 
 def send_main_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
-            [{"text": "📄 Доверенность Москва Карго", "callback_data": "power_moscow_cargo"}],
-            [{"text": "📄 Универсальная доверенность (Порты РФ)", "callback_data": "power_ports_rf"}],
+            [
+                {
+                    "text": "📄 Доверенность Москва Карго",
+                    "callback_data": "power_moscow_cargo"
+                }
+            ],
+            [
+                {
+                    "text": "📄 Универсальная доверенность (Порты РФ)",
+                    "callback_data": "power_ports_rf"
+                }
+            ],
         ]
     }
+
     send_message(chat_id, "Выберите действие:", keyboard)
 
 
@@ -92,31 +112,32 @@ def handle_callback(callback):
     )
 
     if data == "power_moscow_cargo":
-       user_states[chat_id] = {
-        "step": "company",
-        "template_type": "moscow_cargo",
-        "data": {}
-    }
-    send_message(chat_id, "Введите название компании-доверителя:")
-    return
+        user_states[chat_id] = {
+            "step": "company",
+            "template_type": "moscow_cargo",
+            "data": {}
+        }
 
-if data == "power_ports_rf":
-    user_states[chat_id] = {
-        "step": "city",
-        "template_type": "ports_rf",
-        "data": {}
-    }
-    send_message(
-        chat_id,
-        "Введите место выдачи доверенности.\nНапример: г. Новосибирск, Российская Федерация"
-    )
-    return
+        send_message(chat_id, "Введите название компании-доверителя:")
+        return
+
+    if data == "power_ports_rf":
+        user_states[chat_id] = {
+            "step": "city",
+            "template_type": "ports_rf",
+            "data": {}
+        }
+
+        send_message(
+            chat_id,
+            "Введите место выдачи доверенности.\nНапример: г. Новосибирск, Российская Федерация"
+        )
+        return
 
     if data in ["transfer_yes", "transfer_no"]:
         state = user_states.get(chat_id)
 
         if not state:
-            send_message(chat_id, "Напишите /start, чтобы начать заново.")
             return
 
         if data == "transfer_yes":
@@ -125,7 +146,7 @@ if data == "power_ports_rf":
             state["data"]["transfer_right"] = "без права передоверия"
 
         state["step"] = "term"
-        send_message(chat_id, "Введите срок действия доверенности. Например: 3 года")
+        send_message(chat_id, "Введите срок действия доверенности. Например: 1 год")
         return
 
 
@@ -137,13 +158,13 @@ def process_power_input(chat_id, text):
 
     step = state["step"]
     data = state["data"]
-    
+
     if step == "city":
-    data["city"] = text
-    state["step"] = "company"
-    send_message(chat_id, "Введите название компании-доверителя:")
-    return
-    
+        data["city"] = text
+        state["step"] = "company"
+        send_message(chat_id, "Введите название компании-доверителя:")
+        return
+
     if step == "company":
         data["company"] = text
         state["step"] = "address"
@@ -171,7 +192,10 @@ def process_power_input(chat_id, text):
     if step == "director_position":
         data["director_position"] = text
         state["step"] = "director_name"
-        send_message(chat_id, "Введите ФИО руководителя в родительном падеже. Например: Иванова Ивана Ивановича")
+        send_message(
+            chat_id,
+            "Введите ФИО руководителя в родительном падеже. Например: Иванова Ивана Ивановича"
+        )
         return
 
     if step == "director_name":
@@ -180,8 +204,18 @@ def process_power_input(chat_id, text):
 
         keyboard = {
             "inline_keyboard": [
-                [{"text": "Да, с правом передоверия", "callback_data": "transfer_yes"}],
-                [{"text": "Нет, без права передоверия", "callback_data": "transfer_no"}],
+                [
+                    {
+                        "text": "Да, с правом передоверия",
+                        "callback_data": "transfer_yes"
+                    }
+                ],
+                [
+                    {
+                        "text": "Нет, без права передоверия",
+                        "callback_data": "transfer_no"
+                    }
+                ],
             ]
         }
 
@@ -190,19 +224,18 @@ def process_power_input(chat_id, text):
 
     if step == "term":
         data["term"] = text
+        template_type = state.get("template_type", "moscow_cargo")
+
         user_states.pop(chat_id, None)
 
         send_message(chat_id, "Формирую доверенность...")
 
-        template_type = state.get("template_type", "moscow_cargo")
-        docx_path = generate_power_document(data, template_type)
-        send_document(chat_id, docx_path, "Готово: Word-файл доверенности")
-
-        pdf_path = convert_to_pdf(docx_path)
-        if pdf_path and pdf_path.exists():
-            send_document(chat_id, pdf_path, "Готово: PDF-файл доверенности")
-        else:
-            send_message(chat_id, "Word-файл готов. PDF пока не сформировался.")
+        try:
+            docx_path = generate_power_document(data, template_type)
+            send_document(chat_id, docx_path, "Готово: Word-файл доверенности")
+        except Exception as error:
+            send_message(chat_id, f"❌ Ошибка при формировании файла:\n{error}")
+            print(f"ERROR GENERATING DOCUMENT: {error}", flush=True)
 
         send_main_menu(chat_id)
         return
@@ -228,12 +261,14 @@ def generate_power_document(data, template_type):
     }
 
     if template_type == "ports_rf":
-       template_path = PORTS_RF_TEMPLATE_PATH
+        template_path = PORTS_RF_TEMPLATE_PATH
+        file_prefix = "Доверенность_Порты_РФ"
     else:
-       template_path = TEMPLATE_PATH
+        template_path = MOSCOW_CARGO_TEMPLATE_PATH
+        file_prefix = "Доверенность_Москва_Карго"
 
     if not template_path.exists():
-       raise FileNotFoundError(f"Не найден шаблон: {template_path}")
+        raise FileNotFoundError(f"Не найден шаблон: {template_path}")
 
     doc = Document(template_path)
 
@@ -247,7 +282,7 @@ def generate_power_document(data, template_type):
                     replace_in_paragraph(paragraph, replacements)
 
     safe_company = make_safe_filename(data["company"])
-    filename = f"Доверенность_Москва_Карго_{number}_{safe_company}.docx"
+    filename = f"{file_prefix}_{number}_{safe_company}.docx"
     output_path = GENERATED_DIR / filename
 
     doc.save(output_path)
@@ -272,63 +307,78 @@ def replace_in_paragraph(paragraph, replacements):
         paragraph.add_run(full_text)
 
 
-def convert_to_pdf(docx_path):
-    try:
-        subprocess.run(
-            [
-                "libreoffice",
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(GENERATED_DIR),
-                str(docx_path),
-            ],
-            check=True,
-            timeout=60,
-        )
-        return docx_path.with_suffix(".pdf")
-
-    except Exception as e:
-        print(f"PDF conversion error: {e}")
-        return None
-
-
 def generate_number():
     global power_counter
+
     power_counter += 1
     year = datetime.now().strftime("%Y")
+
     return f"ДМК-{year}-{str(power_counter).zfill(3)}"
 
 
 def make_safe_filename(text):
     bad_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+
     for char in bad_chars:
         text = text.replace(char, "_")
+
     return text.replace(" ", "_")[:60]
+
 
 def get_russian_date_text():
     now = datetime.now()
 
     days = {
-        1: "первое", 2: "второе", 3: "третье", 4: "четвертое", 5: "пятое",
-        6: "шестое", 7: "седьмое", 8: "восьмое", 9: "девятое", 10: "десятое",
-        11: "одиннадцатое", 12: "двенадцатое", 13: "тринадцатое", 14: "четырнадцатое",
-        15: "пятнадцатое", 16: "шестнадцатое", 17: "семнадцатое", 18: "восемнадцатое",
-        19: "девятнадцатое", 20: "двадцатое", 21: "двадцать первое",
-        22: "двадцать второе", 23: "двадцать третье", 24: "двадцать четвертое",
-        25: "двадцать пятое", 26: "двадцать шестое", 27: "двадцать седьмое",
-        28: "двадцать восьмое", 29: "двадцать девятое", 30: "тридцатое",
-        31: "тридцать первое"
+        1: "первое",
+        2: "второе",
+        3: "третье",
+        4: "четвертое",
+        5: "пятое",
+        6: "шестое",
+        7: "седьмое",
+        8: "восьмое",
+        9: "девятое",
+        10: "десятое",
+        11: "одиннадцатое",
+        12: "двенадцатое",
+        13: "тринадцатое",
+        14: "четырнадцатое",
+        15: "пятнадцатое",
+        16: "шестнадцатое",
+        17: "семнадцатое",
+        18: "восемнадцатое",
+        19: "девятнадцатое",
+        20: "двадцатое",
+        21: "двадцать первое",
+        22: "двадцать второе",
+        23: "двадцать третье",
+        24: "двадцать четвертое",
+        25: "двадцать пятое",
+        26: "двадцать шестое",
+        27: "двадцать седьмое",
+        28: "двадцать восьмое",
+        29: "двадцать девятое",
+        30: "тридцатое",
+        31: "тридцать первое",
     }
 
     months = {
-        1: "января", 2: "февраля", 3: "марта", 4: "апреля",
-        5: "мая", 6: "июня", 7: "июля", 8: "августа",
-        9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
+        1: "января",
+        2: "февраля",
+        3: "марта",
+        4: "апреля",
+        5: "мая",
+        6: "июня",
+        7: "июля",
+        8: "августа",
+        9: "сентября",
+        10: "октября",
+        11: "ноября",
+        12: "декабря",
     }
 
     return f"{days[now.day]} {months[now.month]} две тысячи двадцать шестого года"
-    
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
