@@ -92,7 +92,7 @@ def handle_callback(callback):
     )
 
     if data == "power_moscow_cargo":
-    user_states[chat_id] = {
+       user_states[chat_id] = {
         "step": "company",
         "template_type": "moscow_cargo",
         "data": {}
