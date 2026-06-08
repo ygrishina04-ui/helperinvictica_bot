@@ -66,7 +66,12 @@ def webhook():
 
 def handle_message(message):
     chat_id = message["chat"]["id"]
+    chat_type = message["chat"]["type"]
     text = message.get("text", "").strip()
+
+    # В группах и рабочих чатах бот молчит
+    if chat_type != "private":
+        return
 
     if text == "/start":
         send_main_menu(chat_id)
@@ -110,7 +115,6 @@ def process_power_input(chat_id, text):
     state = user_states.get(chat_id)
 
     if not state:
-        send_message(chat_id, "Напишите /start, чтобы открыть меню.")
         return
 
     step = state["step"]
