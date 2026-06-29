@@ -142,6 +142,8 @@ def save_daily_summary(message):
 
     conn.commit()
     conn.close()
+    print("Сводка сохранена!", flush=True)
+    print(parsed, flush=True)
 
 
 def handle_report_message(message, send_message_func):
@@ -165,8 +167,8 @@ def handle_report_message(message, send_message_func):
 def build_weekly_report(chat_id):
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
 
-    last_monday = today - timedelta(days=today.weekday() + 7)
-    last_sunday = last_monday + timedelta(days=6)
+    last_monday = today - timedelta(days=8)
+    last_sunday = today
 
     start_dt = datetime.combine(last_monday, datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
     end_dt = datetime.combine(last_sunday, datetime.max.time()).strftime("%Y-%m-%d %H:%M:%S")
