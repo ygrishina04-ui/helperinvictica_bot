@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from pathlib import Path
+from reports import init_reports_db, handle_report_message, start_weekly_reports
 
 import requests
 from flask import Flask, request
@@ -91,8 +92,9 @@ def handle_message(message):
     chat_type = message["chat"]["type"]
     text = message.get("text", "").strip()
 
-    # В группах и рабочих чатах бот молчит
+    # В группах бот принимает только ежедневные сводки
     if chat_type != "private":
+        handle_report_message(message, send_message)
         return
 
     if text == "/start":
@@ -381,4 +383,6 @@ def get_russian_date_text():
 
 
 if __name__ == "__main__":
+    init_reports_db()
+    start_weekly_reports(send_message)
     app.run(host="0.0.0.0", port=5000)
