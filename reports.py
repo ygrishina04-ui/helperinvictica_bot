@@ -87,12 +87,19 @@ def parse_summary(text):
 
 
 def save_daily_summary(message):
-    parsed = parse_summary(message.text)
+    text = message.get("text", "")
+    parsed = parse_summary(text)
 
-    user = message.from_user
+    chat_id = message["chat"]["id"]
+
+    user = message.get("from", {})
+    user_id = user.get("id")
+    username = user.get("username", "")
+    first_name = user.get("first_name", "")
+    last_name = user.get("last_name", "")
+    full_name = f"{first_name} {last_name}".strip()
+
     now = datetime.now(ZoneInfo(TIMEZONE))
-
-    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     passed_clients_text = "\n".join(parsed["passed_clients"])
 
     conn = sqlite3.connect(DB_NAME)
@@ -117,9 +124,9 @@ def save_daily_summary(message):
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        message.chat.id,
-        user.id,
-        user.username,
+        chat_id,
+        user_id,
+        username,
         full_name,
         parsed["summary_date"],
         parsed["created"],
@@ -129,12 +136,30 @@ def save_daily_summary(message):
         parsed["without_feedback"],
         parsed["passed_rate"],
         passed_clients_text,
-        message.text,
+        text,
         now.strftime("%Y-%m-%d %H:%M:%S")
     ))
 
     conn.commit()
     conn.close()
+
+
+def handle_report_message(message, send_message_func):
+    text = message.get("text", "").strip()
+    chat_id = message["chat"]["id"]
+
+    if not text:
+        return
+
+    if text.lower().startswith("сводка за:"):
+        save_daily_summary(message)
+        send_message_func(chat_id, "✅ Сводка принята")
+        return
+
+    if text == "/weekly_report":
+        report = build_weekly_report(chat_id)
+        send_long_message(send_message_func, chat_id, report)
+        return
 
 
 def build_weekly_report(chat_id):
@@ -179,12 +204,11 @@ def build_weekly_report(chat_id):
     total_without_feedback = 0
     total_passed_rate = 0
     all_clients = []
-
     daily_blocks = []
 
     for row in rows:
         summary_date = row[0]
-        full_name = row[1]
+        full_name = row[1] or "Без имени"
         created = row[2]
         calculated = row[3]
         not_created = row[4]
@@ -211,7 +235,7 @@ def build_weekly_report(chat_id):
 
     clients_text = "\n".join([f"— {client}" for client in all_clients]) if all_clients else "— нет"
 
-    report = (
+    return (
         f"📊 Итоговая сводка за неделю\n"
         f"{last_monday.strftime('%d.%m')}–{last_sunday.strftime('%d.%m')}\n\n"
         f"ИТОГО:\n"
@@ -227,36 +251,15 @@ def build_weekly_report(chat_id):
         f"{chr(10).join(daily_blocks)}"
     )
 
-    return report
 
-
-def send_long_message(bot, chat_id, text):
+def send_long_message(send_message_func, chat_id, text):
     max_len = 3900
 
     for i in range(0, len(text), max_len):
-        bot.send_message(chat_id, text[i:i + max_len])
+        send_message_func(chat_id, text[i:i + max_len])
 
 
-def register_reports_handlers(bot):
-
-    @bot.message_handler(func=lambda message: message.chat.type in ["group", "supergroup"])
-    def collect_daily_summary(message):
-        if not message.text:
-            return
-
-        text = message.text.strip()
-
-        if text.lower().startswith("сводка за:"):
-            save_daily_summary(message)
-            bot.reply_to(message, "✅ Сводка принята")
-
-    @bot.message_handler(commands=["weekly_report"])
-    def manual_weekly_report(message):
-        report = build_weekly_report(message.chat.id)
-        send_long_message(bot, message.chat.id, report)
-
-
-def weekly_report_loop(bot):
+def weekly_report_loop(send_message_func):
     last_sent_date = None
 
     while True:
@@ -269,32 +272,26 @@ def weekly_report_loop(bot):
                 conn = sqlite3.connect(DB_NAME)
                 cur = conn.cursor()
 
-                cur.execute("""
-                    SELECT DISTINCT chat_id 
-                    FROM daily_summaries
-                """)
-
+                cur.execute("SELECT DISTINCT chat_id FROM daily_summaries")
                 chats = cur.fetchall()
+
                 conn.close()
 
                 for chat in chats:
                     chat_id = chat[0]
                     report = build_weekly_report(chat_id)
-                    send_long_message(bot, chat_id, report)
+                    send_long_message(send_message_func, chat_id, report)
 
                 last_sent_date = today
 
         time.sleep(30)
 
 
-def start_reports(bot):
-    init_reports_db()
-    register_reports_handlers(bot)
-
-    threading.Thread(
+def start_weekly_reports(send_message_func):
+    thread = threading.Thread(
         target=weekly_report_loop,
-        args=(bot,),
+        args=(send_message_func,),
         daemon=True
-    ).start()
-
-    print("Модуль отчетов запущен")
+    )
+    thread.start()
+    print("Модуль еженедельных отчетов запущен", flush=True)
