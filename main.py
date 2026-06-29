@@ -32,7 +32,9 @@ def send_message(chat_id, text, reply_markup=None):
         payload["reply_markup"] = reply_markup
 
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
-
+    
+init_reports_db()
+start_weekly_reports(send_message)
 
 def send_document(chat_id, file_path, caption=""):
     with open(file_path, "rb") as file:
@@ -383,6 +385,4 @@ def get_russian_date_text():
 
 
 if __name__ == "__main__":
-    init_reports_db()
-    start_weekly_reports(send_message)
     app.run(host="0.0.0.0", port=5000)
