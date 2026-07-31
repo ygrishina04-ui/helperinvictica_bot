@@ -9,22 +9,67 @@ from zoneinfo import ZoneInfo
 TIMEZONE = os.getenv("REPORTS_TIMEZONE", "Asia/Vladivostok")
 DB_NAME = os.getenv("REPORTS_DB_NAME", "daily_summaries.db")
 
-# Настройки напоминания «Обновите статусы МОРЕ».
-# Если STATUS_CHAT_ID и STATUS_LOGIST_USER_ID не заполнены,
-# автоматическая отправка задания будет отключена.
+# Настройки трех ежедневных напоминаний по статусам заказов.
+# STATUS_CHAT_ID — чат, куда бот отправляет задания и повторные напоминания.
+# FINAL_STATUS_CHAT_ID — другой чат, куда отправляется только итоговое сообщение.
 STATUS_CHAT_ID = os.getenv("STATUS_CHAT_ID", "").strip()
-STATUS_LOGIST_USER_ID = os.getenv("STATUS_LOGIST_USER_ID", "").strip()
-STATUS_LOGIST_USERNAME = os.getenv("STATUS_LOGIST_USERNAME", "").strip().lstrip("@")
-STATUS_SEND_TIME = os.getenv("STATUS_SEND_TIME", "10:00").strip()
-STATUS_REMINDER_MINUTES = int(os.getenv("STATUS_REMINDER_MINUTES", "60"))
-STATUS_REACTION_EMOJI = os.getenv("STATUS_REACTION_EMOJI", "✅").strip() or "✅"
+FINAL_STATUS_CHAT_ID = os.getenv("FINAL_STATUS_CHAT_ID", "").strip()
+STATUS_REACTION_EMOJI = "✅"
 
-# По умолчанию задание отправляется только по будням.
-STATUS_WEEKDAYS = {
-    int(value.strip())
-    for value in os.getenv("STATUS_WEEKDAYS", "0,1,2,3,4").split(",")
-    if value.strip().isdigit()
-}
+DMITRIY_USER_ID = 337526112
+EVGENIY_USER_ID = 7839493170
+
+STATUS_WEEKDAYS = {0, 1, 2, 3, 4}
+
+STATUS_REMINDERS = [
+    {
+        "task_type": "booking",
+        "send_time": "10:00",
+        "deadline_time": "11:00",
+        "text": (
+            "⏰ Напоминание\n\n"
+            "С 10:00 до 11:00 необходимо обновить все заказы "
+            "в статусе «Букинг»\n"
+            "@dk_shekhovtcov\n\n"
+            "После выполнения поставьте реакцию ✅ на это сообщение."
+        ),
+        "responsible": [
+            (DMITRIY_USER_ID, "dk_shekhovtcov"),
+        ],
+    },
+    {
+        "task_type": "sea",
+        "send_time": "11:00",
+        "deadline_time": "11:30",
+        "text": (
+            "⏰ Напоминание\n\n"
+            "С 11:00 до 11:30 необходимо обновить все заказы "
+            "в статусе «Море»\n"
+            "@dk_shekhovtcov, @Osipov_INV\n\n"
+            "После выполнения поставьте реакцию ✅ на это сообщение."
+        ),
+        "responsible": [
+            (DMITRIY_USER_ID, "dk_shekhovtcov"),
+            (EVGENIY_USER_ID, "Osipov_INV"),
+        ],
+    },
+    {
+        "task_type": "port",
+        "send_time": "11:30",
+        "deadline_time": "12:00",
+        "text": (
+            "⏰ Напоминание\n\n"
+            "С 11:30 до 12:00 необходимо обновить все заказы "
+            "в статусе «Порт», а также обновить ДО1, "
+            "дополнительные меры и отгрузку по ЖД\n"
+            "@Osipov_INV\n\n"
+            "После выполнения поставьте реакцию ✅ на это сообщение."
+        ),
+        "responsible": [
+            (EVGENIY_USER_ID, "Osipov_INV"),
+        ],
+    },
+]
 
 _DB_LOCK = threading.Lock()
 
@@ -87,6 +132,13 @@ def init_reports_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_reaction_tasks_pending
             ON reaction_tasks(completed, reminder_sent, deadline_at)
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS status_final_messages (
+                task_date TEXT PRIMARY KEY,
+                sent_at TEXT NOT NULL
+            )
         """)
 
         conn.commit()
@@ -221,23 +273,6 @@ def handle_report_message(message, send_message_func):
         send_long_message(send_message_func, chat_id, report)
         return
 
-    # Ручной тест отправки задания. Команда работает в группе.
-    # После теста её можно оставить или удалить.
-    if text == "/sea_status":
-        if not STATUS_LOGIST_USER_ID:
-            send_message_func(
-                chat_id,
-                "❌ Не задан STATUS_LOGIST_USER_ID в переменных окружения.",
-            )
-            return
-
-        create_sea_status_task(
-            send_message_func=send_message_func,
-            chat_id=chat_id,
-            responsible_user_id=int(STATUS_LOGIST_USER_ID),
-            responsible_username=STATUS_LOGIST_USERNAME,
-        )
-        return
 
 
 def build_weekly_report(chat_id):
@@ -350,93 +385,57 @@ def send_long_message(send_message_func, chat_id, text):
         send_message_func(chat_id, text[i:i + max_len])
 
 
-def create_reaction_task(
-    send_message_func,
-    chat_id,
-    responsible_user_id,
-    text,
-    task_type,
-    responsible_username="",
-    required_emoji="✅",
-    reminder_minutes=60,
-):
-    now = datetime.now(ZoneInfo(TIMEZONE))
-    deadline = now + timedelta(minutes=reminder_minutes)
+def parse_clock(value):
+    hour_text, minute_text = value.split(":", 1)
+    hour = int(hour_text)
+    minute = int(minute_text)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError(f"Некорректное время: {value}")
+    return hour, minute
 
-    sent_message = send_message_func(chat_id, text)
+
+def create_status_task(send_message_func, reminder):
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    deadline_hour, deadline_minute = parse_clock(reminder["deadline_time"])
+    deadline = now.replace(
+        hour=deadline_hour,
+        minute=deadline_minute,
+        second=0,
+        microsecond=0,
+    )
+
+    sent_message = send_message_func(int(STATUS_CHAT_ID), reminder["text"])
     message_id = sent_message["message_id"]
 
     with _DB_LOCK:
         conn = get_db_connection()
         cur = conn.cursor()
-
-        cur.execute("""
-            INSERT OR REPLACE INTO reaction_tasks (
-                task_type,
-                chat_id,
-                message_id,
-                responsible_user_id,
-                responsible_username,
-                required_emoji,
-                sent_at,
-                deadline_at,
-                completed,
-                completed_at,
-                reminder_sent,
-                reminder_sent_at,
-                last_reaction_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, NULL, NULL)
-        """, (
-            task_type,
-            int(chat_id),
-            int(message_id),
-            int(responsible_user_id),
-            responsible_username or "",
-            required_emoji,
-            now.strftime("%Y-%m-%d %H:%M:%S"),
-            deadline.strftime("%Y-%m-%d %H:%M:%S"),
-        ))
-
+        for user_id, username in reminder["responsible"]:
+            cur.execute("""
+                INSERT OR REPLACE INTO reaction_tasks (
+                    task_type, chat_id, message_id,
+                    responsible_user_id, responsible_username,
+                    required_emoji, sent_at, deadline_at,
+                    completed, completed_at,
+                    reminder_sent, reminder_sent_at, last_reaction_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, NULL, NULL)
+            """, (
+                reminder["task_type"],
+                int(STATUS_CHAT_ID),
+                int(message_id),
+                int(user_id),
+                username,
+                STATUS_REACTION_EMOJI,
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                deadline.strftime("%Y-%m-%d %H:%M:%S"),
+            ))
         conn.commit()
         conn.close()
 
     print(
-        f"Создана задача реакции: chat_id={chat_id}, "
-        f"message_id={message_id}, user_id={responsible_user_id}",
+        f"Отправлено задание {reminder['task_type']}: message_id={message_id}",
         flush=True,
-    )
-
-    return sent_message
-
-
-def create_sea_status_task(
-    send_message_func,
-    chat_id,
-    responsible_user_id,
-    responsible_username="",
-):
-    mention = (
-        f"@{responsible_username}, "
-        if responsible_username
-        else ""
-    )
-
-    text = (
-        f"🌊 {mention}обновите статусы МОРЕ.\n\n"
-        f"После обновления поставьте {STATUS_REACTION_EMOJI} "
-        "на это сообщение."
-    )
-
-    return create_reaction_task(
-        send_message_func=send_message_func,
-        chat_id=chat_id,
-        responsible_user_id=responsible_user_id,
-        responsible_username=responsible_username,
-        text=text,
-        task_type="sea_status",
-        required_emoji=STATUS_REACTION_EMOJI,
-        reminder_minutes=STATUS_REMINDER_MINUTES,
     )
 
 
@@ -445,50 +444,32 @@ def handle_report_reaction(
     message_id,
     user_id,
     reaction_emojis,
+    send_message_func=None,
 ):
-    """
-    Вызывается из основного файла при получении message_reaction.
-
-    Реакция засчитывается только когда:
-    1. совпадает чат;
-    2. совпадает сообщение;
-    3. совпадает Telegram ID ответственного;
-    4. присутствует нужный emoji.
-    """
     now = datetime.now(ZoneInfo(TIMEZONE))
     now_text = now.strftime("%Y-%m-%d %H:%M:%S")
 
     with _DB_LOCK:
         conn = get_db_connection()
         cur = conn.cursor()
-
         cur.execute("""
-            SELECT id, required_emoji, completed
+            SELECT id, required_emoji
             FROM reaction_tasks
             WHERE chat_id = ?
               AND message_id = ?
               AND responsible_user_id = ?
             LIMIT 1
-        """, (
-            int(chat_id),
-            int(message_id),
-            int(user_id),
-        ))
-
+        """, (int(chat_id), int(message_id), int(user_id)))
         task = cur.fetchone()
 
         if not task:
             conn.close()
             return
 
-        required_emoji = task["required_emoji"]
-        completed = 1 if required_emoji in reaction_emojis else 0
-
+        completed = 1 if task["required_emoji"] in reaction_emojis else 0
         cur.execute("""
             UPDATE reaction_tasks
-            SET completed = ?,
-                completed_at = ?,
-                last_reaction_at = ?
+            SET completed = ?, completed_at = ?, last_reaction_at = ?
             WHERE id = ?
         """, (
             completed,
@@ -496,39 +477,20 @@ def handle_report_reaction(
             now_text,
             task["id"],
         ))
-
         conn.commit()
         conn.close()
 
-    if completed:
-        print(
-            f"Задача подтверждена реакцией: chat_id={chat_id}, "
-            f"message_id={message_id}, user_id={user_id}",
-            flush=True,
-        )
-    else:
-        print(
-            f"Нужная реакция снята или заменена: chat_id={chat_id}, "
-            f"message_id={message_id}, user_id={user_id}",
-            flush=True,
-        )
+    if completed and send_message_func:
+        check_and_send_final_status(send_message_func, now.date())
 
 
 def build_reminder_text(task):
     username = (task["responsible_username"] or "").strip()
-
     mention = f"@{username}, " if username else ""
-
-    if task["task_type"] == "sea_status":
-        return (
-            f"⏰ {mention}напоминаю: необходимо обновить статусы МОРЕ.\n"
-            f"После обновления поставьте {task['required_emoji']} "
-            "на исходное сообщение."
-        )
-
     return (
-        f"⏰ {mention}напоминаю: подтверждение выполнения не получено.\n"
-        f"Поставьте {task['required_emoji']} на исходное сообщение."
+        f"⏰ {mention}задача ещё не подтверждена.\n\n"
+        f"После выполнения поставьте {task['required_emoji']} "
+        "на исходное сообщение."
     )
 
 
@@ -539,7 +501,6 @@ def process_due_reaction_tasks(send_message_func):
     with _DB_LOCK:
         conn = get_db_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT *
             FROM reaction_tasks
@@ -548,7 +509,6 @@ def process_due_reaction_tasks(send_message_func):
               AND deadline_at <= ?
             ORDER BY deadline_at ASC
         """, (now_text,))
-
         tasks = cur.fetchall()
         conn.close()
 
@@ -559,56 +519,88 @@ def process_due_reaction_tasks(send_message_func):
                 build_reminder_text(task),
                 reply_to_message_id=task["message_id"],
             )
-
-            sent_at = datetime.now(ZoneInfo(TIMEZONE)).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-
             with _DB_LOCK:
                 conn = get_db_connection()
                 cur = conn.cursor()
-
-                # Повторно проверяем completed, чтобы не отправить
-                # напоминание одновременно с поступившей реакцией.
                 cur.execute("""
                     UPDATE reaction_tasks
-                    SET reminder_sent = 1,
-                        reminder_sent_at = ?
-                    WHERE id = ?
-                      AND completed = 0
-                      AND reminder_sent = 0
-                """, (
-                    sent_at,
-                    task["id"],
-                ))
-
+                    SET reminder_sent = 1, reminder_sent_at = ?
+                    WHERE id = ? AND completed = 0 AND reminder_sent = 0
+                """, (now_text, task["id"]))
                 conn.commit()
                 conn.close()
-
-            print(
-                f"Отправлено напоминание: task_id={task['id']}",
-                flush=True,
-            )
-
         except Exception as error:
-            print(
-                f"ERROR SENDING REACTION REMINDER "
-                f"task_id={task['id']}: {error}",
-                flush=True,
+            print(f"ERROR SENDING REMINDER task_id={task['id']}: {error}", flush=True)
+
+
+def check_and_send_final_status(send_message_func, task_date):
+    if not FINAL_STATUS_CHAT_ID:
+        return
+
+    date_text = task_date.strftime("%Y-%m-%d")
+    day_start = f"{date_text} 00:00:00"
+    day_end = f"{date_text} 23:59:59"
+
+    with _DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT 1 FROM status_final_messages WHERE task_date = ?",
+            (date_text,),
+        )
+        if cur.fetchone():
+            conn.close()
+            return
+
+        cur.execute("""
+            SELECT task_type,
+                   COUNT(*) AS total_count,
+                   SUM(completed) AS completed_count
+            FROM reaction_tasks
+            WHERE sent_at BETWEEN ? AND ?
+              AND task_type IN ('booking', 'sea', 'port')
+            GROUP BY task_type
+        """, (day_start, day_end))
+        rows = cur.fetchall()
+        status = {
+            row["task_type"]: row["total_count"] == row["completed_count"]
+            for row in rows
+        }
+
+        all_done = (
+            status.get("booking") is True
+            and status.get("sea") is True
+            and status.get("port") is True
+        )
+
+        if not all_done:
+            conn.close()
+            return
+
+        cur.execute("""
+            INSERT INTO status_final_messages (task_date, sent_at)
+            VALUES (?, ?)
+        """, (date_text, datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+
+    try:
+        send_message_func(
+            int(FINAL_STATUS_CHAT_ID),
+            "✅ Заказы в статусе: букинг, море, порт — полностью обновлены.",
+        )
+    except Exception:
+        # Разрешаем повторную попытку, если Telegram не принял сообщение.
+        with _DB_LOCK:
+            conn = get_db_connection()
+            conn.execute(
+                "DELETE FROM status_final_messages WHERE task_date = ?",
+                (date_text,),
             )
-
-
-def reaction_reminder_loop(send_message_func):
-    while True:
-        try:
-            process_due_reaction_tasks(send_message_func)
-        except Exception as error:
-            print(
-                f"ERROR IN REACTION REMINDER LOOP: {error}",
-                flush=True,
-            )
-
-        time.sleep(30)
+            conn.commit()
+            conn.close()
+        raise
 
 
 def weekly_report_loop(send_message_func):
@@ -624,95 +616,77 @@ def weekly_report_loop(send_message_func):
                 with _DB_LOCK:
                     conn = get_db_connection()
                     cur = conn.cursor()
-
-                    cur.execute(
-                        "SELECT DISTINCT chat_id FROM daily_summaries"
-                    )
+                    cur.execute("SELECT DISTINCT chat_id FROM daily_summaries")
                     chats = cur.fetchall()
-
                     conn.close()
 
                 for chat in chats:
                     chat_id = chat["chat_id"]
                     report = build_weekly_report(chat_id)
-                    send_long_message(
-                        send_message_func,
-                        chat_id,
-                        report,
-                    )
+                    send_long_message(send_message_func, chat_id, report)
 
                 last_sent_date = today
 
         time.sleep(30)
 
 
-def parse_status_send_time():
-    try:
-        hour_text, minute_text = STATUS_SEND_TIME.split(":", 1)
-        hour = int(hour_text)
-        minute = int(minute_text)
-
-        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-            raise ValueError
-
-        return hour, minute
-
-    except (ValueError, AttributeError):
-        raise ValueError(
-            "STATUS_SEND_TIME должен быть в формате ЧЧ:ММ, "
-            "например 10:00"
-        )
+def reaction_reminder_loop(send_message_func):
+    while True:
+        try:
+            process_due_reaction_tasks(send_message_func)
+            check_and_send_final_status(
+                send_message_func,
+                datetime.now(ZoneInfo(TIMEZONE)).date(),
+            )
+        except Exception as error:
+            print(f"ERROR IN REACTION LOOP: {error}", flush=True)
+        time.sleep(30)
 
 
-def sea_status_schedule_loop(send_message_func):
-    if not STATUS_CHAT_ID or not STATUS_LOGIST_USER_ID:
-        print(
-            "Автоматическая отправка статусов МОРЕ отключена: "
-            "не заполнены STATUS_CHAT_ID и STATUS_LOGIST_USER_ID",
-            flush=True,
-        )
+def status_schedule_loop(send_message_func):
+    if not STATUS_CHAT_ID:
+        print("Статусные напоминания отключены: не задан STATUS_CHAT_ID", flush=True)
         return
 
     try:
-        chat_id = int(STATUS_CHAT_ID)
-        responsible_user_id = int(STATUS_LOGIST_USER_ID)
-        send_hour, send_minute = parse_status_send_time()
+        int(STATUS_CHAT_ID)
+        if FINAL_STATUS_CHAT_ID:
+            int(FINAL_STATUS_CHAT_ID)
+        for reminder in STATUS_REMINDERS:
+            parse_clock(reminder["send_time"])
+            parse_clock(reminder["deadline_time"])
     except ValueError as error:
-        print(
-            f"Автоматическая отправка статусов МОРЕ отключена: {error}",
-            flush=True,
-        )
+        print(f"Статусные напоминания отключены: {error}", flush=True)
         return
 
-    last_sent_date = None
+    sent_today = set()
+    current_date = None
 
     while True:
         now = datetime.now(ZoneInfo(TIMEZONE))
         today = now.strftime("%Y-%m-%d")
 
-        should_send = (
-            now.weekday() in STATUS_WEEKDAYS
-            and now.hour == send_hour
-            and now.minute == send_minute
-            and last_sent_date != today
-        )
+        if current_date != today:
+            current_date = today
+            sent_today.clear()
 
-        if should_send:
-            try:
-                create_sea_status_task(
-                    send_message_func=send_message_func,
-                    chat_id=chat_id,
-                    responsible_user_id=responsible_user_id,
-                    responsible_username=STATUS_LOGIST_USERNAME,
-                )
-                last_sent_date = today
-
-            except Exception as error:
-                print(
-                    f"ERROR SENDING SEA STATUS TASK: {error}",
-                    flush=True,
-                )
-
+        if now.weekday() in STATUS_WEEKDAYS:
+            for reminder in STATUS_REMINDERS:
+                send_hour, send_minute = parse_clock(reminder["send_time"])
+                task_type = reminder["task_type"]
+                if (
+                    now.hour == send_hour
+                    and now.minute == send_minute
+                    and task_type not in sent_today
+                ):
+                    try:
+                        create_status_task(send_message_func, reminder)
+                        sent_today.add(task_type)
+                    except Exception as error:
+                        print(
+                            f"ERROR SENDING STATUS TASK {task_type}: {error}",
+                            flush=True,
+                        )
         time.sleep(20)
 
 
@@ -733,15 +707,15 @@ def start_weekly_reports(send_message_func):
     )
     reminder_thread.start()
 
-    sea_status_thread = threading.Thread(
-        target=sea_status_schedule_loop,
+    status_thread = threading.Thread(
+        target=status_schedule_loop,
         args=(send_message_func,),
         daemon=True,
-        name="sea-status-schedule",
+        name="status-schedule",
     )
-    sea_status_thread.start()
+    status_thread.start()
 
     print(
-        "Модуль отчетов, реакций и напоминаний запущен",
+        "Модуль отчетов, реакций и статусных напоминаний запущен",
         flush=True,
     )
