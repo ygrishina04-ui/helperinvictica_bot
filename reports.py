@@ -1,40 +1,96 @@
-import sqlite3
+import os
 import re
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-TIMEZONE = "Asia/Vladivostok"
-DB_NAME = "daily_summaries.db"
+TIMEZONE = os.getenv("REPORTS_TIMEZONE", "Asia/Vladivostok")
+DB_NAME = os.getenv("REPORTS_DB_NAME", "daily_summaries.db")
+
+# Настройки напоминания «Обновите статусы МОРЕ».
+# Если STATUS_CHAT_ID и STATUS_LOGIST_USER_ID не заполнены,
+# автоматическая отправка задания будет отключена.
+STATUS_CHAT_ID = os.getenv("STATUS_CHAT_ID", "").strip()
+STATUS_LOGIST_USER_ID = os.getenv("STATUS_LOGIST_USER_ID", "").strip()
+STATUS_LOGIST_USERNAME = os.getenv("STATUS_LOGIST_USERNAME", "").strip().lstrip("@")
+STATUS_SEND_TIME = os.getenv("STATUS_SEND_TIME", "10:00").strip()
+STATUS_REMINDER_MINUTES = int(os.getenv("STATUS_REMINDER_MINUTES", "60"))
+STATUS_REACTION_EMOJI = os.getenv("STATUS_REACTION_EMOJI", "✅").strip() or "✅"
+
+# По умолчанию задание отправляется только по будням.
+STATUS_WEEKDAYS = {
+    int(value.strip())
+    for value in os.getenv("STATUS_WEEKDAYS", "0,1,2,3,4").split(",")
+    if value.strip().isdigit()
+}
+
+_DB_LOCK = threading.Lock()
+
+
+def get_db_connection():
+    conn = sqlite3.connect(
+        DB_NAME,
+        timeout=30,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_reports_db():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+    with _DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS daily_summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            user_id INTEGER,
-            username TEXT,
-            full_name TEXT,
-            summary_date TEXT,
-            created INTEGER,
-            calculated INTEGER,
-            not_created INTEGER,
-            hanging INTEGER,
-            without_feedback INTEGER,
-            passed_rate INTEGER,
-            passed_clients TEXT,
-            raw_text TEXT,
-            created_at TEXT
-        )
-    """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                user_id INTEGER,
+                username TEXT,
+                full_name TEXT,
+                summary_date TEXT,
+                created INTEGER,
+                calculated INTEGER,
+                not_created INTEGER,
+                hanging INTEGER,
+                without_feedback INTEGER,
+                passed_rate INTEGER,
+                passed_clients TEXT,
+                raw_text TEXT,
+                created_at TEXT
+            )
+        """)
 
-    conn.commit()
-    conn.close()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reaction_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_type TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                responsible_user_id INTEGER NOT NULL,
+                responsible_username TEXT,
+                required_emoji TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                deadline_at TEXT NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                completed_at TEXT,
+                reminder_sent INTEGER NOT NULL DEFAULT 0,
+                reminder_sent_at TEXT,
+                last_reaction_at TEXT,
+                UNIQUE(chat_id, message_id, responsible_user_id)
+            )
+        """)
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reaction_tasks_pending
+            ON reaction_tasks(completed, reminder_sent, deadline_at)
+        """)
+
+        conn.commit()
+        conn.close()
 
 
 def parse_summary(text):
@@ -46,7 +102,7 @@ def parse_summary(text):
         "hanging": 0,
         "without_feedback": 0,
         "passed_rate": 0,
-        "passed_clients": []
+        "passed_clients": [],
     }
 
     date_match = re.search(r"Сводка за:\s*(\d{2}/\d{2})", text, re.IGNORECASE)
@@ -59,7 +115,7 @@ def parse_summary(text):
         "not_created": r"Запросов не заведено\s*(\d+)",
         "hanging": r"Зависшие запросы\s*(\d+)",
         "without_feedback": r"Запросов без ОС\s*(\d+)",
-        "passed_rate": r"Прошли по ставке:?\s*(\d+)"
+        "passed_rate": r"Прошли по ставке:?\s*(\d+)",
     }
 
     for key, pattern in patterns.items():
@@ -102,46 +158,48 @@ def save_daily_summary(message):
     now = datetime.now(ZoneInfo(TIMEZONE))
     passed_clients_text = "\n".join(parsed["passed_clients"])
 
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+    with _DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    cur.execute("""
-        INSERT INTO daily_summaries (
+        cur.execute("""
+            INSERT INTO daily_summaries (
+                chat_id,
+                user_id,
+                username,
+                full_name,
+                summary_date,
+                created,
+                calculated,
+                not_created,
+                hanging,
+                without_feedback,
+                passed_rate,
+                passed_clients,
+                raw_text,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
             chat_id,
             user_id,
             username,
             full_name,
-            summary_date,
-            created,
-            calculated,
-            not_created,
-            hanging,
-            without_feedback,
-            passed_rate,
-            passed_clients,
-            raw_text,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        chat_id,
-        user_id,
-        username,
-        full_name,
-        parsed["summary_date"],
-        parsed["created"],
-        parsed["calculated"],
-        parsed["not_created"],
-        parsed["hanging"],
-        parsed["without_feedback"],
-        parsed["passed_rate"],
-        passed_clients_text,
-        text,
-        now.strftime("%Y-%m-%d %H:%M:%S")
-    ))
+            parsed["summary_date"],
+            parsed["created"],
+            parsed["calculated"],
+            parsed["not_created"],
+            parsed["hanging"],
+            parsed["without_feedback"],
+            parsed["passed_rate"],
+            passed_clients_text,
+            text,
+            now.strftime("%Y-%m-%d %H:%M:%S"),
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+
     print("Сводка сохранена!", flush=True)
     print(parsed, flush=True)
 
@@ -163,6 +221,24 @@ def handle_report_message(message, send_message_func):
         send_long_message(send_message_func, chat_id, report)
         return
 
+    # Ручной тест отправки задания. Команда работает в группе.
+    # После теста её можно оставить или удалить.
+    if text == "/sea_status":
+        if not STATUS_LOGIST_USER_ID:
+            send_message_func(
+                chat_id,
+                "❌ Не задан STATUS_LOGIST_USER_ID в переменных окружения.",
+            )
+            return
+
+        create_sea_status_task(
+            send_message_func=send_message_func,
+            chat_id=chat_id,
+            responsible_user_id=int(STATUS_LOGIST_USER_ID),
+            responsible_username=STATUS_LOGIST_USERNAME,
+        )
+        return
+
 
 def build_weekly_report(chat_id):
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
@@ -170,31 +246,39 @@ def build_weekly_report(chat_id):
     last_monday = today - timedelta(days=8)
     last_sunday = today
 
-    start_dt = datetime.combine(last_monday, datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
-    end_dt = datetime.combine(last_sunday, datetime.max.time()).strftime("%Y-%m-%d %H:%M:%S")
+    start_dt = datetime.combine(
+        last_monday,
+        datetime.min.time(),
+    ).strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+    end_dt = datetime.combine(
+        last_sunday,
+        datetime.max.time(),
+    ).strftime("%Y-%m-%d %H:%M:%S")
 
-    cur.execute("""
-        SELECT 
-            summary_date,
-            full_name,
-            created,
-            calculated,
-            not_created,
-            hanging,
-            without_feedback,
-            passed_rate,
-            passed_clients
-        FROM daily_summaries
-        WHERE chat_id = ?
-        AND created_at BETWEEN ? AND ?
-        ORDER BY created_at ASC
-    """, (chat_id, start_dt, end_dt))
+    with _DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute("""
+            SELECT
+                summary_date,
+                full_name,
+                created,
+                calculated,
+                not_created,
+                hanging,
+                without_feedback,
+                passed_rate,
+                passed_clients
+            FROM daily_summaries
+            WHERE chat_id = ?
+            AND created_at BETWEEN ? AND ?
+            ORDER BY created_at ASC
+        """, (chat_id, start_dt, end_dt))
+
+        rows = cur.fetchall()
+        conn.close()
 
     if not rows:
         return "За прошлую неделю сводок не найдено."
@@ -209,15 +293,15 @@ def build_weekly_report(chat_id):
     daily_blocks = []
 
     for row in rows:
-        summary_date = row[0]
-        full_name = row[1] or "Без имени"
-        created = row[2]
-        calculated = row[3]
-        not_created = row[4]
-        hanging = row[5]
-        without_feedback = row[6]
-        passed_rate = row[7]
-        passed_clients = row[8]
+        summary_date = row["summary_date"]
+        full_name = row["full_name"] or "Без имени"
+        created = row["created"]
+        calculated = row["calculated"]
+        not_created = row["not_created"]
+        hanging = row["hanging"]
+        without_feedback = row["without_feedback"]
+        passed_rate = row["passed_rate"]
+        passed_clients = row["passed_clients"]
 
         total_created += created
         total_calculated += calculated
@@ -231,25 +315,30 @@ def build_weekly_report(chat_id):
 
         daily_blocks.append(
             f"📅 {summary_date} — {full_name}\n"
-            f"Заведено: {created}, посчитано: {calculated}, не заведено: {not_created}, "
-            f"зависшие: {hanging}, без ОС: {without_feedback}, прошли по ставке: {passed_rate}"
+            f"Заведено: {created}, посчитано: {calculated}, "
+            f"не заведено: {not_created}, зависшие: {hanging}, "
+            f"без ОС: {without_feedback}, прошли по ставке: {passed_rate}"
         )
 
-    clients_text = "\n".join([f"— {client}" for client in all_clients]) if all_clients else "— нет"
+    clients_text = (
+        "\n".join(f"— {client}" for client in all_clients)
+        if all_clients
+        else "— нет"
+    )
 
     return (
-        f"📊 Итоговая сводка за неделю\n"
+        "📊 Итоговая сводка за неделю\n"
         f"{last_monday.strftime('%d.%m')}–{last_sunday.strftime('%d.%m')}\n\n"
-        f"ИТОГО:\n"
+        "ИТОГО:\n"
         f"Запросов заведено: {total_created}\n"
         f"Запросов посчитано: {total_calculated}\n"
         f"Запросов не заведено: {total_not_created}\n"
         f"Зависшие запросы: {total_hanging}\n"
         f"Запросов без ОС: {total_without_feedback}\n"
         f"Прошли по ставке: {total_passed_rate}\n\n"
-        f"Клиенты, которые прошли по ставке:\n"
+        "Клиенты, которые прошли по ставке:\n"
         f"{clients_text}\n\n"
-        f"Детализация по дням:\n"
+        "Детализация по дням:\n"
         f"{chr(10).join(daily_blocks)}"
     )
 
@@ -259,6 +348,267 @@ def send_long_message(send_message_func, chat_id, text):
 
     for i in range(0, len(text), max_len):
         send_message_func(chat_id, text[i:i + max_len])
+
+
+def create_reaction_task(
+    send_message_func,
+    chat_id,
+    responsible_user_id,
+    text,
+    task_type,
+    responsible_username="",
+    required_emoji="✅",
+    reminder_minutes=60,
+):
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    deadline = now + timedelta(minutes=reminder_minutes)
+
+    sent_message = send_message_func(chat_id, text)
+    message_id = sent_message["message_id"]
+
+    with _DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT OR REPLACE INTO reaction_tasks (
+                task_type,
+                chat_id,
+                message_id,
+                responsible_user_id,
+                responsible_username,
+                required_emoji,
+                sent_at,
+                deadline_at,
+                completed,
+                completed_at,
+                reminder_sent,
+                reminder_sent_at,
+                last_reaction_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, NULL, NULL)
+        """, (
+            task_type,
+            int(chat_id),
+            int(message_id),
+            int(responsible_user_id),
+            responsible_username or "",
+            required_emoji,
+            now.strftime("%Y-%m-%d %H:%M:%S"),
+            deadline.strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+
+        conn.commit()
+        conn.close()
+
+    print(
+        f"Создана задача реакции: chat_id={chat_id}, "
+        f"message_id={message_id}, user_id={responsible_user_id}",
+        flush=True,
+    )
+
+    return sent_message
+
+
+def create_sea_status_task(
+    send_message_func,
+    chat_id,
+    responsible_user_id,
+    responsible_username="",
+):
+    mention = (
+        f"@{responsible_username}, "
+        if responsible_username
+        else ""
+    )
+
+    text = (
+        f"🌊 {mention}обновите статусы МОРЕ.\n\n"
+        f"После обновления поставьте {STATUS_REACTION_EMOJI} "
+        "на это сообщение."
+    )
+
+    return create_reaction_task(
+        send_message_func=send_message_func,
+        chat_id=chat_id,
+        responsible_user_id=responsible_user_id,
+        responsible_username=responsible_username,
+        text=text,
+        task_type="sea_status",
+        required_emoji=STATUS_REACTION_EMOJI,
+        reminder_minutes=STATUS_REMINDER_MINUTES,
+    )
+
+
+def handle_report_reaction(
+    chat_id,
+    message_id,
+    user_id,
+    reaction_emojis,
+):
+    """
+    Вызывается из основного файла при получении message_reaction.
+
+    Реакция засчитывается только когда:
+    1. совпадает чат;
+    2. совпадает сообщение;
+    3. совпадает Telegram ID ответственного;
+    4. присутствует нужный emoji.
+    """
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    with _DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT id, required_emoji, completed
+            FROM reaction_tasks
+            WHERE chat_id = ?
+              AND message_id = ?
+              AND responsible_user_id = ?
+            LIMIT 1
+        """, (
+            int(chat_id),
+            int(message_id),
+            int(user_id),
+        ))
+
+        task = cur.fetchone()
+
+        if not task:
+            conn.close()
+            return
+
+        required_emoji = task["required_emoji"]
+        completed = 1 if required_emoji in reaction_emojis else 0
+
+        cur.execute("""
+            UPDATE reaction_tasks
+            SET completed = ?,
+                completed_at = ?,
+                last_reaction_at = ?
+            WHERE id = ?
+        """, (
+            completed,
+            now_text if completed else None,
+            now_text,
+            task["id"],
+        ))
+
+        conn.commit()
+        conn.close()
+
+    if completed:
+        print(
+            f"Задача подтверждена реакцией: chat_id={chat_id}, "
+            f"message_id={message_id}, user_id={user_id}",
+            flush=True,
+        )
+    else:
+        print(
+            f"Нужная реакция снята или заменена: chat_id={chat_id}, "
+            f"message_id={message_id}, user_id={user_id}",
+            flush=True,
+        )
+
+
+def build_reminder_text(task):
+    username = (task["responsible_username"] or "").strip()
+
+    mention = f"@{username}, " if username else ""
+
+    if task["task_type"] == "sea_status":
+        return (
+            f"⏰ {mention}напоминаю: необходимо обновить статусы МОРЕ.\n"
+            f"После обновления поставьте {task['required_emoji']} "
+            "на исходное сообщение."
+        )
+
+    return (
+        f"⏰ {mention}напоминаю: подтверждение выполнения не получено.\n"
+        f"Поставьте {task['required_emoji']} на исходное сообщение."
+    )
+
+
+def process_due_reaction_tasks(send_message_func):
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    with _DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT *
+            FROM reaction_tasks
+            WHERE completed = 0
+              AND reminder_sent = 0
+              AND deadline_at <= ?
+            ORDER BY deadline_at ASC
+        """, (now_text,))
+
+        tasks = cur.fetchall()
+        conn.close()
+
+    for task in tasks:
+        try:
+            send_message_func(
+                task["chat_id"],
+                build_reminder_text(task),
+                reply_to_message_id=task["message_id"],
+            )
+
+            sent_at = datetime.now(ZoneInfo(TIMEZONE)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            with _DB_LOCK:
+                conn = get_db_connection()
+                cur = conn.cursor()
+
+                # Повторно проверяем completed, чтобы не отправить
+                # напоминание одновременно с поступившей реакцией.
+                cur.execute("""
+                    UPDATE reaction_tasks
+                    SET reminder_sent = 1,
+                        reminder_sent_at = ?
+                    WHERE id = ?
+                      AND completed = 0
+                      AND reminder_sent = 0
+                """, (
+                    sent_at,
+                    task["id"],
+                ))
+
+                conn.commit()
+                conn.close()
+
+            print(
+                f"Отправлено напоминание: task_id={task['id']}",
+                flush=True,
+            )
+
+        except Exception as error:
+            print(
+                f"ERROR SENDING REACTION REMINDER "
+                f"task_id={task['id']}: {error}",
+                flush=True,
+            )
+
+
+def reaction_reminder_loop(send_message_func):
+    while True:
+        try:
+            process_due_reaction_tasks(send_message_func)
+        except Exception as error:
+            print(
+                f"ERROR IN REACTION REMINDER LOOP: {error}",
+                flush=True,
+            )
+
+        time.sleep(30)
 
 
 def weekly_report_loop(send_message_func):
@@ -271,29 +621,127 @@ def weekly_report_loop(send_message_func):
             today = now.strftime("%Y-%m-%d")
 
             if last_sent_date != today:
-                conn = sqlite3.connect(DB_NAME)
-                cur = conn.cursor()
+                with _DB_LOCK:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
 
-                cur.execute("SELECT DISTINCT chat_id FROM daily_summaries")
-                chats = cur.fetchall()
+                    cur.execute(
+                        "SELECT DISTINCT chat_id FROM daily_summaries"
+                    )
+                    chats = cur.fetchall()
 
-                conn.close()
+                    conn.close()
 
                 for chat in chats:
-                    chat_id = chat[0]
+                    chat_id = chat["chat_id"]
                     report = build_weekly_report(chat_id)
-                    send_long_message(send_message_func, chat_id, report)
+                    send_long_message(
+                        send_message_func,
+                        chat_id,
+                        report,
+                    )
 
                 last_sent_date = today
 
         time.sleep(30)
 
 
+def parse_status_send_time():
+    try:
+        hour_text, minute_text = STATUS_SEND_TIME.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError
+
+        return hour, minute
+
+    except (ValueError, AttributeError):
+        raise ValueError(
+            "STATUS_SEND_TIME должен быть в формате ЧЧ:ММ, "
+            "например 10:00"
+        )
+
+
+def sea_status_schedule_loop(send_message_func):
+    if not STATUS_CHAT_ID or not STATUS_LOGIST_USER_ID:
+        print(
+            "Автоматическая отправка статусов МОРЕ отключена: "
+            "не заполнены STATUS_CHAT_ID и STATUS_LOGIST_USER_ID",
+            flush=True,
+        )
+        return
+
+    try:
+        chat_id = int(STATUS_CHAT_ID)
+        responsible_user_id = int(STATUS_LOGIST_USER_ID)
+        send_hour, send_minute = parse_status_send_time()
+    except ValueError as error:
+        print(
+            f"Автоматическая отправка статусов МОРЕ отключена: {error}",
+            flush=True,
+        )
+        return
+
+    last_sent_date = None
+
+    while True:
+        now = datetime.now(ZoneInfo(TIMEZONE))
+        today = now.strftime("%Y-%m-%d")
+
+        should_send = (
+            now.weekday() in STATUS_WEEKDAYS
+            and now.hour == send_hour
+            and now.minute == send_minute
+            and last_sent_date != today
+        )
+
+        if should_send:
+            try:
+                create_sea_status_task(
+                    send_message_func=send_message_func,
+                    chat_id=chat_id,
+                    responsible_user_id=responsible_user_id,
+                    responsible_username=STATUS_LOGIST_USERNAME,
+                )
+                last_sent_date = today
+
+            except Exception as error:
+                print(
+                    f"ERROR SENDING SEA STATUS TASK: {error}",
+                    flush=True,
+                )
+
+        time.sleep(20)
+
+
 def start_weekly_reports(send_message_func):
-    thread = threading.Thread(
+    weekly_thread = threading.Thread(
         target=weekly_report_loop,
         args=(send_message_func,),
-        daemon=True
+        daemon=True,
+        name="weekly-reports",
     )
-    thread.start()
-    print("Модуль еженедельных отчетов запущен", flush=True)
+    weekly_thread.start()
+
+    reminder_thread = threading.Thread(
+        target=reaction_reminder_loop,
+        args=(send_message_func,),
+        daemon=True,
+        name="reaction-reminders",
+    )
+    reminder_thread.start()
+
+    sea_status_thread = threading.Thread(
+        target=sea_status_schedule_loop,
+        args=(send_message_func,),
+        daemon=True,
+        name="sea-status-schedule",
+    )
+    sea_status_thread.start()
+
+    print(
+        "Модуль отчетов, реакций и напоминаний запущен",
+        flush=True,
+    )
