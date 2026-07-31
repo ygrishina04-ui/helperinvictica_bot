@@ -125,12 +125,13 @@ def handle_message(message):
     chat_id = message["chat"]["id"]
     chat_type = message["chat"]["type"]
     text = message.get("text", "").strip()
+
     if text == "/debug":
         user = message.get("from", {})
 
         send_message(
-        chat_id,
-        f"""
+            chat_id,
+            f"""
 🛠 Debug
 
 Chat ID: {chat_id}
@@ -142,10 +143,10 @@ Name: {user.get("first_name", "")} {user.get("last_name", "")}
 
 Message ID: {message.get("message_id")}
 """.strip()
-    )
-    return
-    
-    # В группах бот принимает только ежедневные сводки
+        )
+        return
+
+    # В группах бот принимает сводки и служебные команды
     if chat_type != "private":
         handle_report_message(message, send_message)
         return
