@@ -156,6 +156,7 @@ Message ID: {message.get("message_id")}
 
     process_power_input(chat_id, text)
 
+
 def handle_message_reaction(reaction_update):
     try:
         chat_id = reaction_update["chat"]["id"]
