@@ -1,7 +1,12 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from reports import init_reports_db, handle_report_message, start_weekly_reports
+from reports import (
+    init_reports_db,
+    handle_report_message,
+    handle_report_reaction,
+    start_weekly_reports,
+)
 
 import requests
 from flask import Flask, request
@@ -22,16 +27,40 @@ user_states = {}
 power_counter = 0
 
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(
+    chat_id,
+    text,
+    reply_markup=None,
+    reply_to_message_id=None,
+):
     payload = {
         "chat_id": chat_id,
-        "text": text
+        "text": text,
     }
 
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+    if reply_to_message_id:
+        payload["reply_parameters"] = {
+            "message_id": reply_to_message_id,
+        }
+
+    response = requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json=payload,
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    result = response.json()
+
+    if not result.get("ok"):
+        raise RuntimeError(
+            f"Telegram не отправил сообщение: {result}"
+        )
+
+    return result["result"]
     
 init_reports_db()
 start_weekly_reports(send_message)
@@ -78,13 +107,16 @@ def index():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = request.get_json()
+    update = request.get_json(silent=True) or {}
 
     if "message" in update:
         handle_message(update["message"])
 
     if "callback_query" in update:
         handle_callback(update["callback_query"])
+
+    if "message_reaction" in update:
+        handle_message_reaction(update["message_reaction"])
 
     return "ok"
 
@@ -104,6 +136,41 @@ def handle_message(message):
         return
 
     process_power_input(chat_id, text)
+
+
+def handle_message_reaction(reaction_update):
+    try:
+        chat_id = reaction_update["chat"]["id"]
+        message_id = reaction_update["message_id"]
+
+        user = reaction_update.get("user")
+
+        # Реакции от имени канала или анонимного администратора
+        # нельзя надёжно сопоставить с конкретным сотрудником.
+        if not user:
+            return
+
+        user_id = user["id"]
+        new_reactions = reaction_update.get("new_reaction", [])
+
+        reaction_emojis = {
+            reaction.get("emoji")
+            for reaction in new_reactions
+            if reaction.get("type") == "emoji"
+        }
+
+        handle_report_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            user_id=user_id,
+            reaction_emojis=reaction_emojis,
+        )
+
+    except Exception as error:
+        print(
+            f"ERROR HANDLING REACTION: {error}",
+            flush=True,
+        )
 
 
 def handle_callback(callback):
