@@ -155,17 +155,6 @@ Message ID: {message.get("message_id")}
         return
 
     process_power_input(chat_id, text)
-    if text == "/test_status":
-
-        send_booking_task(send_message_func, chat_id)
-
-        send_sea_task(send_message_func, chat_id)
-
-        send_port_task(send_message_func, chat_id)
-
-        send_message_func(chat_id, "✅ Тестовые задания отправлены")
-
-    return
 
 def handle_message_reaction(reaction_update):
     try:
