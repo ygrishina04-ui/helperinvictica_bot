@@ -125,10 +125,10 @@ def handle_message(message):
     chat_id = message["chat"]["id"]
     chat_type = message["chat"]["type"]
     text = message.get("text", "").strip()
-if text == "/debug":
-    user = message.get("from", {})
+    if text == "/debug":
+        user = message.get("from", {})
 
-    send_message(
+        send_message(
         chat_id,
         f"""
 🛠 Debug
