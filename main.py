@@ -183,6 +183,7 @@ def handle_message_reaction(reaction_update):
             message_id=message_id,
             user_id=user_id,
             reaction_emojis=reaction_emojis,
+            send_message_func=send_message,
         )
 
     except Exception as error:
