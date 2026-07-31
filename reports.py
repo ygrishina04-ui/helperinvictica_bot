@@ -262,26 +262,48 @@ def handle_report_message(message, send_message_func):
 
     if not text:
         return
-        
-    if text == "/test_status":
-        send_all_status_tasks(
-            send_message_func=send_message_func,
-            chat_id=chat_id,
-            force=True,
-        )
-    
-        send_message_func(
-            chat_id,
-            "✅ Тестовые задания отправлены",
-        )
+
+    # Поддерживает и /test_status,
+    # и /test_status@username_бота в группе
+    if text.split("@")[0] == "/test_status":
+        try:
+            if not STATUS_CHAT_ID:
+                send_message_func(
+                    chat_id,
+                    "❌ В Render не заполнена переменная STATUS_CHAT_ID",
+                )
+                return
+
+            for reminder in STATUS_REMINDERS:
+                create_status_task(
+                    send_message_func,
+                    reminder,
+                )
+
+            send_message_func(
+                chat_id,
+                "✅ Три тестовых напоминания отправлены",
+            )
+
+        except Exception as error:
+            print(
+                f"ERROR /test_status: {error}",
+                flush=True,
+            )
+
+            send_message_func(
+                chat_id,
+                f"❌ Ошибка теста: {error}",
+            )
+
         return
-    
+
     if text.lower().startswith("сводка за:"):
         save_daily_summary(message)
         send_message_func(chat_id, "✅ Сводка принята")
         return
 
-    if text == "/weekly_report":
+    if text.split("@")[0] == "/weekly_report":
         report = build_weekly_report(chat_id)
         send_long_message(send_message_func, chat_id, report)
         return
