@@ -262,7 +262,19 @@ def handle_report_message(message, send_message_func):
 
     if not text:
         return
+        
+    if text == "/test_status":
+    send_message_func(
+        int(STATUS_CHAT_ID),
+        "🧪 Тестовое сообщение"
+    )
 
+    send_message_func(
+        chat_id,
+        "✅ Команда обработана"
+    )
+    return
+    
     if text.lower().startswith("сводка за:"):
         save_daily_summary(message)
         send_message_func(chat_id, "✅ Сводка принята")
