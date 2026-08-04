@@ -263,16 +263,30 @@ def handle_report_message(message, send_message_func):
     if not text:
         return
         
-    if text == "/test_status":
-        send_message_func(
-        int(STATUS_CHAT_ID),
-        "🧪 Тестовое сообщение"
-    )
+    if text.split("@")[0] == "/test_status":
+    try:
+        for reminder in STATUS_REMINDERS:
+            create_status_task(
+                send_message_func,
+                reminder,
+            )
 
         send_message_func(
-        chat_id,
-        "✅ Команда обработана"
-    )
+            chat_id,
+            "✅ Три тестовых напоминания отправлены",
+        )
+
+    except Exception as error:
+        print(
+            f"ERROR /test_status: {error}",
+            flush=True,
+        )
+
+        send_message_func(
+            chat_id,
+            f"❌ Ошибка теста: {error}",
+        )
+
     return
     
     if text.lower().startswith("сводка за:"):
