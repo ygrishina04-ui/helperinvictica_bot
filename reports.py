@@ -14,7 +14,7 @@ DB_NAME = os.getenv("REPORTS_DB_NAME", "daily_summaries.db")
 # FINAL_STATUS_CHAT_ID — другой чат, куда отправляется только итоговое сообщение.
 STATUS_CHAT_ID = os.getenv("STATUS_CHAT_ID", "").strip()
 FINAL_STATUS_CHAT_ID = os.getenv("FINAL_STATUS_CHAT_ID", "").strip()
-STATUS_REACTION_EMOJI = "✅"
+STATUS_REACTION_EMOJI = "👍"
 
 DMITRIY_USER_ID = 337526112
 EVGENIY_USER_ID = 7839493170
@@ -31,7 +31,7 @@ STATUS_REMINDERS = [
             "С 10:00 до 11:00 необходимо обновить все заказы "
             "в статусе «Букинг»\n"
             "@dk_shekhovtcov\n\n"
-            "После выполнения поставьте реакцию ✅ на это сообщение."
+            "После выполнения поставьте реакцию 👍 на это сообщение."
         ),
         "responsible": [
             (DMITRIY_USER_ID, "dk_shekhovtcov"),
@@ -46,7 +46,7 @@ STATUS_REMINDERS = [
             "С 11:00 до 11:30 необходимо обновить все заказы "
             "в статусе «Море»\n"
             "@dk_shekhovtcov, @Osipov_INV\n\n"
-            "После выполнения поставьте реакцию ✅ на это сообщение."
+            "После выполнения поставьте реакцию 👍 на это сообщение."
         ),
         "responsible": [
             (DMITRIY_USER_ID, "dk_shekhovtcov"),
@@ -63,7 +63,7 @@ STATUS_REMINDERS = [
             "в статусе «Порт», а также обновить ДО1, "
             "дополнительные меры и отгрузку по ЖД\n"
             "@Osipov_INV\n\n"
-            "После выполнения поставьте реакцию ✅ на это сообщение."
+            "После выполнения поставьте реакцию 👍 на это сообщение."
         ),
         "responsible": [
             (EVGENIY_USER_ID, "Osipov_INV"),
