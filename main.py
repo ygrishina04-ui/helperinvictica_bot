@@ -148,6 +148,7 @@ Message ID: {message.get("message_id")}
 
     # В группах бот принимает сводки и служебные команды.
     if chat_type != "private":
+        send_message(chat_id, f"DEBUG: {text}")
         handle_report_message(message, send_message)
         return
 
