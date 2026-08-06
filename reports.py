@@ -263,6 +263,33 @@ def handle_report_message(message, send_message_func):
     if not text:
         return
 
+    if text.split("@")[0] == "/test_chat":
+    try:
+        target_chat_id = int(STATUS_CHAT_ID)
+
+        send_message_func(
+            target_chat_id,
+            "🧪 Проверка отправки в общий чат"
+        )
+
+        send_message_func(
+            chat_id,
+            f"✅ Сообщение отправлено в чат {target_chat_id}"
+        )
+
+    except Exception as error:
+        print(
+            f"ERROR /test_chat: {error}",
+            flush=True,
+        )
+
+        send_message_func(
+            chat_id,
+            f"❌ Ошибка отправки: {error}"
+        )
+
+    return
+    
     # Поддерживает и /test_status,
     # и /test_status@username_бота в группе
     if text.split("@")[0] == "/test_status":
